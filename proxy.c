@@ -187,18 +187,22 @@ void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header)
 
     Rio_readlineb(rp, buf, MAXLINE);
     printf("%s", buf);
-    strcpy(host_header, buf); /* Host header */
     while(strcmp(buf, "\r\n")) {
-		Rio_readlineb(rp, buf, MAXLINE);
-		printf("%s", buf);
 		/* Ignore certain header values */
-		if ((!strstr(buf, "User-Agent")) &&
-            (!strstr(buf, "Accept")) && 
-			(!strstr(buf, "Accept-Encoding")) &&			
-			(!strstr(buf, "Connection")) &&
-			(!strstr(buf, "Proxy-Connection"))) {
-			strcpy(additional_header, buf); /* Additional headers */
+		if ((!strstr(buf, "User-Agent:")) &&
+            (!strstr(buf, "Accept:")) && 
+			(!strstr(buf, "Accept-Encoding:")) &&			
+			(!strstr(buf, "Connection:")) &&
+			(!strstr(buf, "Proxy-Connection:"))) {
+            if (strstr(buf, "Host:")) {
+                strcpy(host_header, buf);
+            }
+            else {
+                strcat(additional_header, buf); /* Additional headers */
+            }
 		}
+        Rio_readlineb(rp, buf, MAXLINE);
+        printf("%s", buf);
     }
     return;
 }
