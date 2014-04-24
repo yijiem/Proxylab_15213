@@ -12,10 +12,10 @@
 void parse_url(char *url, char *hostname, char *port_string, char *uri);
 void send_msg(int fd, char *msg_title, char* msg_detail);
 void change_http_version(char *version);
-
+void show_proxy_target(char *hostname, int port, char *proxy_request);
+void launch_request(int fd, char *hostname, int port, char *proxy_request);
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header);
-void get_filetype(char *filename, char *filetype);
 void clienterror(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg);
 
@@ -64,13 +64,10 @@ int main(int argc, char **argv)
  */
 void doit(int fd) 
 {
-    int is_static;
-    struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], url[MAXLINE], version[MAXLINE];
     char uri[MAXLINE], hostname[MAXLINE];
     char host_header[MAXLINE], additional_header[MAXLINE];
     rio_t rio;
-    int proxyfd;
     char proxy_request[MAXLINE], request_header[MAXLINE];
     char port_string[MAXLINE];
   
@@ -88,6 +85,10 @@ void doit(int fd)
     memset(proxy_request, 0, sizeof(proxy_request));
     /* Reset request header */
     memset(request_header, 0, sizeof(request_header));
+    /* Reset host header */
+    memset(host_header, 0, sizeof(host_header));
+    /* Reset additional header */
+    memset(additional_header, 0, sizeof(additional_header));
     /* Reset hostname */
     memset(hostname, 0, sizeof(hostname));
 
@@ -119,44 +120,71 @@ void doit(int fd)
         strcat(request_header, hostname);
         strcat(request_header, "\r\n");
     }
-    strcat(request_header, user_agent_hdr);
-    strcat(request_header, accept_hdr);
-    strcat(request_header, accept_encoding_hdr);
+    // strcat(request_header, user_agent_hdr);
+    // strcat(request_header, accept_hdr);
+    // strcat(request_header, accept_encoding_hdr);
     strcat(request_header, "Connection: close\r\n");
     strcat(request_header, "Proxy-Connection: close\r\n");
     strcat(request_header, additional_header);
     strcat(proxy_request, request_header);
     strcat(proxy_request, "\r\n");
 
-    /* For debugging */
-    // send_msg(fd, "proxy_request:\n", proxy_request);
-    // send_msg(fd, "connect to host: ", hostname);
-
     /* Open connection to target server */
     int port;
     if(*port_string != NULL){
-        port = atoi(port_string); 
+        port = atoi(port_string);
     } else {
         port = atoi("80"); /* set default HTTP port */
     }
     
+    /* Displays proxy's target */
+    show_proxy_target(hostname, port, proxy_request);
+
+    /* Proxy launch request on behalf of user */
+    launch_request(fd, hostname, port, proxy_request);
+
+}
+
+/*
+ * proxy launches request on behalf of user
+ */
+ void launch_request(int fd, char *hostname, int port, char *proxy_request) {
+
+    int proxyfd = open_clientfd(hostname, port);
+    rio_t rio_proxy;
+    char buf2[MAXLINE];
+
+    /* error handling */
+    if (proxyfd == -2) {
+        clienterror(fd, hostname, "001", "DNS error",
+                "Server not found");
+        return;
+    }
+    if (proxyfd == -1) {
+        clienterror(fd, hostname, "002", "Unix error",
+            "Cannot connect to server at this port");
+        return;
+    }
+    /* deliver server's response to client */
+    Rio_readinitb(&rio_proxy, proxyfd);
+    Rio_writen(proxyfd, proxy_request, strlen(proxy_request));
+    while (Rio_readlineb(&rio_proxy, buf2, MAXLINE)) {
+        Rio_writen(fd, buf2, strlen(buf2));
+    }
+    Close(proxyfd);
+ }
+
+
+/*
+ * prints proxy's target including hostname, port number and proxy_request
+ */
+ void show_proxy_target(char *hostname, int port, char *proxy_request) {
     printf("----PROXY TARGET----\n");
     printf("hostname = %s\n", hostname);
     printf("port number = %d\n", port);
     printf("----REQUEST HEADER----\n");
     printf(proxy_request);
-
-    proxyfd = Open_clientfd(hostname, port);
-    Rio_readinitb(&rio, proxyfd);
-    /* deliver server's response to client */
-    char buf2[MAXLINE];
-    Rio_writen(proxyfd, proxy_request, strlen(proxy_request));
-    while (Rio_readlineb(&rio, buf2, MAXLINE)) {
-    	Rio_writen(fd, buf2, strlen(buf2));
-    }
-    Close(proxyfd);
-
-}
+ }
 
 /*
  * change_http_version - change the http version to HTTP/1.0
@@ -165,7 +193,6 @@ void doit(int fd)
  	if (version[strlen(version) - 1] == '1')
  		version[strlen(version) - 1] = '0';
  }
-
 
 /*
  * send_msg - proxy sends a msg to client, for debugging purpose
@@ -189,9 +216,9 @@ void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header)
     printf("%s", buf);
     while(strcmp(buf, "\r\n")) {
 		/* Ignore certain header values */
-		if ((!strstr(buf, "User-Agent:")) &&
+		if (/*(!strstr(buf, "User-Agent:")) &&
             (!strstr(buf, "Accept:")) && 
-			(!strstr(buf, "Accept-Encoding:")) &&			
+			(!strstr(buf, "Accept-Encoding:")) &&*/			
 			(!strstr(buf, "Connection:")) &&
 			(!strstr(buf, "Proxy-Connection:"))) {
             if (strstr(buf, "Host:")) {
