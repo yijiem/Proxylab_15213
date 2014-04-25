@@ -13,9 +13,9 @@ void parse_url(char *url, char *hostname, char *port_string, char *uri);
 void send_msg(int fd, char *msg_title, char* msg_detail);
 void change_http_version(char *version);
 void show_proxy_target(char *hostname, int port, char *proxy_request);
-void launch_request(int fd, char *hostname, int port, char *proxy_request);
+void launch_request(char *buf, int fd, char *hostname, int port, char *proxy_request);
 void doit(int fd);
-void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header);
+void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header);
 void clienterror(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg);
 
@@ -37,12 +37,13 @@ int main(int argc, char **argv)
     int listenfd,connfd,port,clientlen;
     struct sockaddr_in clientaddr;
 
+    /* Ignore SIGPIPE */
+    Signal(SIGPIPE, SIG_IGN);
     /* Block SIGPIPE */
     sigset_t mask;
     Sigemptyset(&mask);
     Sigaddset(&mask, SIGPIPE);
     Sigprocmask(SIG_BLOCK, &mask, NULL);
-
 
     /* Check command line args */
     if (argc != 2) {
@@ -73,9 +74,55 @@ void Rio_writen_new(int fd, void *usrbuf, size_t n)
 {
     if (rio_writen(fd, usrbuf, n) != n) {
         /* Ignore */
-        /* printf("encountered rio_writen error...that's ok...\n"); */
+         printf("Oops! Rio_writen error...\n");
+         return; 
     }
         
+}
+
+/*
+ * our wrapper for rio_readn, does not exit proxy
+ */
+size_t Rio_readn_new(int fd, void *ptr, size_t nbytes)
+{
+    size_t n;
+
+    if ((n = rio_readn(fd, ptr, nbytes)) < 0) {
+        /* Ignore */
+        printf("Oops! Rio_readn error...\n");
+        return n;
+    }
+
+}
+
+/*
+ * our wrapper for rio_readnb, does not exit proxy
+ */
+size_t Rio_readnb_new(rio_t *rp, void *usrbuf, size_t n)
+{
+    size_t rc;
+
+    if ((rc = rio_readnb(rp, usrbuf, n)) < 0) {
+        /* Ignore */
+        printf("Oops! Rio_readnb error...\n");
+        return rc;
+    }
+
+}
+
+/*
+ * our wrapper for rio_readlineb, does not exit proxy
+ */
+size_t Rio_readlineb_new(rio_t *rp, void *usrbuf, size_t maxlen)
+{
+    size_t rc;
+
+    if ((rc = rio_readlineb(rp, usrbuf, maxlen)) < 0) {
+        /* Ignore */
+        printf("Rio_readlineb error");
+        return rc;
+    }
+
 }
 
 /*
@@ -83,16 +130,17 @@ void Rio_writen_new(int fd, void *usrbuf, size_t n)
  */
 void doit(int fd) 
 {
+    int port;
     char buf[MAXLINE], method[MAXLINE], url[MAXLINE], version[MAXLINE];
     char uri[MAXLINE], hostname[MAXLINE];
     char host_header[MAXLINE], additional_header[MAXLINE];
-    rio_t rio;
     char proxy_request[MAXLINE], request_header[MAXLINE];
     char port_string[MAXLINE];
+    rio_t rio;
   
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
-    Rio_readlineb(&rio, buf, MAXLINE);
+    Rio_readlineb_new(&rio, buf, MAXLINE);
     sscanf(buf, "%s %s %s", method, url, version);
     if (strcasecmp(method, "GET")) { 
        clienterror(fd, method, "501", "Not Implemented",
@@ -100,6 +148,9 @@ void doit(int fd)
         return;
     }
 
+
+    /* Reset buf */
+    memset(buf, 0, sizeof(buf));
     /* Reset proxy request */
     memset(proxy_request, 0, sizeof(proxy_request));
     /* Reset request header */
@@ -131,7 +182,7 @@ void doit(int fd)
     // printf("debug host_header: %s\n", host_header);
     // printf("debug additional_header: %s\n", additional_header);
 
-    read_requesthdrs(&rio, host_header, additional_header); 
+    read_requesthdrs(buf, &rio, host_header, additional_header); 
 
     /* Set up HTTP request header */
     if (strstr(host_header,"Host")) {
@@ -152,7 +203,6 @@ void doit(int fd)
     strcat(proxy_request, "\r\n");
 
     /* Open connection to target server */
-    int port;
     if(*port_string != NULL){
         port = atoi(port_string);
     } else {
@@ -163,18 +213,19 @@ void doit(int fd)
     show_proxy_target(hostname, port, proxy_request);
 
     /* Proxy launch request on behalf of user */
-    launch_request(fd, hostname, port, proxy_request);
+    launch_request(buf, fd, hostname, port, proxy_request);
 
 }
 
 /*
  * proxy launches request on behalf of user
  */
- void launch_request(int fd, char *hostname, int port, char *proxy_request) {
+ void launch_request(char *buf, int fd, char *hostname, int port, char *proxy_request) {
 
     int proxyfd = open_clientfd(hostname, port);
     rio_t rio_proxy;
-    char buf2[MAXLINE];
+    // char buf2[MAXLINE];
+    size_t count;
 
     /* error handling */
     if (proxyfd == -2) {
@@ -190,8 +241,8 @@ void doit(int fd)
     /* deliver server's response to client */
     Rio_readinitb(&rio_proxy, proxyfd);
     Rio_writen_new(proxyfd, proxy_request, strlen(proxy_request));
-    while (Rio_readlineb(&rio_proxy, buf2, MAXLINE)) {
-        Rio_writen_new(fd, buf2, strlen(buf2));
+    while ((count = Rio_readn_new(proxyfd, buf, MAXLINE)) > 0) {
+        Rio_writen_new(fd, buf, count);
     }
     Close(proxyfd);
  }
@@ -230,15 +281,15 @@ void doit(int fd)
  * read_requesthdrs - read and parse HTTP request headers
  */
 
-void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header) 
+void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header) 
 {
-    char buf[MAXLINE];
 
-    /* Reset buf */
-    // memset(buf, 0, sizeof(buf));
+    Rio_readlineb_new(rp, buf, MAXLINE);
 
-    Rio_readlineb(rp, buf, MAXLINE);
-    // printf("%s", buf);
+    /* Return when buffer is empty */
+    if (strlen(buf) == 0) {
+        return;
+    }
     while(strcmp(buf, "\r\n")) {
 		/* Ignore certain header values */
 		if ((!strstr(buf, "User-Agent:")) &&
@@ -253,7 +304,7 @@ void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header)
                 strcat(additional_header, buf); /* Additional headers */
             }
 		}
-        Rio_readlineb(rp, buf, MAXLINE);
+        Rio_readlineb_new(rp, buf, MAXLINE);
         // printf("%s", buf);
     }
     return;
