@@ -37,6 +37,13 @@ int main(int argc, char **argv)
     int listenfd,connfd,port,clientlen;
     struct sockaddr_in clientaddr;
 
+    /* Block SIGPIPE */
+    sigset_t mask;
+    Sigemptyset(&mask);
+    Sigaddset(&mask, SIGPIPE);
+    Sigprocmask(SIG_BLOCK, &mask, NULL);
+
+
     /* Check command line args */
     if (argc != 2) {
     	fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -57,6 +64,18 @@ int main(int argc, char **argv)
     	Close(connfd);
     }
     return 0;
+}
+
+/*
+ * our wrapper for rio_writen, does not exit proxy
+ */
+void Rio_writen_new(int fd, void *usrbuf, size_t n) 
+{
+    if (rio_writen(fd, usrbuf, n) != n) {
+        /* Ignore */
+        /* printf("encountered rio_writen error...that's ok...\n"); */
+    }
+        
 }
 
 /*
@@ -109,6 +128,9 @@ void doit(int fd)
      * and some additional header other then we
      * will define
      */
+    // printf("debug host_header: %s\n", host_header);
+    // printf("debug additional_header: %s\n", additional_header);
+
     read_requesthdrs(&rio, host_header, additional_header); 
 
     /* Set up HTTP request header */
@@ -120,9 +142,9 @@ void doit(int fd)
         strcat(request_header, hostname);
         strcat(request_header, "\r\n");
     }
-    // strcat(request_header, user_agent_hdr);
-    // strcat(request_header, accept_hdr);
-    // strcat(request_header, accept_encoding_hdr);
+    strcat(request_header, user_agent_hdr);
+    strcat(request_header, accept_hdr);
+    strcat(request_header, accept_encoding_hdr);
     strcat(request_header, "Connection: close\r\n");
     strcat(request_header, "Proxy-Connection: close\r\n");
     strcat(request_header, additional_header);
@@ -156,20 +178,20 @@ void doit(int fd)
 
     /* error handling */
     if (proxyfd == -2) {
-        clienterror(fd, hostname, "001", "DNS error",
+        clienterror(fd, hostname, "Oops!", "DNS error",
                 "Server not found");
         return;
     }
     if (proxyfd == -1) {
-        clienterror(fd, hostname, "002", "Unix error",
+        clienterror(fd, hostname, "Oops!", "Unix error",
             "Cannot connect to server at this port");
         return;
     }
     /* deliver server's response to client */
     Rio_readinitb(&rio_proxy, proxyfd);
-    Rio_writen(proxyfd, proxy_request, strlen(proxy_request));
+    Rio_writen_new(proxyfd, proxy_request, strlen(proxy_request));
     while (Rio_readlineb(&rio_proxy, buf2, MAXLINE)) {
-        Rio_writen(fd, buf2, strlen(buf2));
+        Rio_writen_new(fd, buf2, strlen(buf2));
     }
     Close(proxyfd);
  }
@@ -201,7 +223,7 @@ void doit(int fd)
 
  	char buf[MAXLINE];
  	sprintf(buf, "From proxy: %s%s\r\n", msg_title, msg_detail);
- 	Rio_writen(fd, buf, strlen(buf));
+ 	Rio_writen_new(fd, buf, strlen(buf));
  }
 
 /*
@@ -212,13 +234,16 @@ void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header)
 {
     char buf[MAXLINE];
 
+    /* Reset buf */
+    // memset(buf, 0, sizeof(buf));
+
     Rio_readlineb(rp, buf, MAXLINE);
-    printf("%s", buf);
+    // printf("%s", buf);
     while(strcmp(buf, "\r\n")) {
 		/* Ignore certain header values */
-		if (/*(!strstr(buf, "User-Agent:")) &&
+		if ((!strstr(buf, "User-Agent:")) &&
             (!strstr(buf, "Accept:")) && 
-			(!strstr(buf, "Accept-Encoding:")) &&*/			
+			(!strstr(buf, "Accept-Encoding:")) &&			
 			(!strstr(buf, "Connection:")) &&
 			(!strstr(buf, "Proxy-Connection:"))) {
             if (strstr(buf, "Host:")) {
@@ -229,7 +254,7 @@ void read_requesthdrs(rio_t *rp, char *host_header, char *additional_header)
             }
 		}
         Rio_readlineb(rp, buf, MAXLINE);
-        printf("%s", buf);
+        // printf("%s", buf);
     }
     return;
 }
@@ -326,12 +351,12 @@ void clienterror(int fd, char *cause, char *errnum,
 
     /* Print the HTTP response */
     sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
-    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen_new(fd, buf, strlen(buf));
     sprintf(buf, "Content-type: text/html\r\n");
-    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen_new(fd, buf, strlen(buf));
     sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
-    Rio_writen(fd, buf, strlen(buf));
-    Rio_writen(fd, body, strlen(body));
+    Rio_writen_new(fd, buf, strlen(buf));
+    Rio_writen_new(fd, body, strlen(body));
 }
 
 
