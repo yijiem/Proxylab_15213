@@ -1,8 +1,8 @@
 /*
-*  Version 1: Sequential web proxy
-*  -------------------------------
-*  Based on tiny web server in CSAPP
-*/
+ *  Version 2: Concurrent Web Proxy
+ *  -------------------------------
+ *  April 25th 2014
+ */
 
 
 #include <stdio.h>
@@ -14,6 +14,7 @@ void send_msg(int fd, char *msg_title, char* msg_detail);
 void change_http_version(char *version);
 void show_proxy_target(char *hostname, int port, char *proxy_request);
 void launch_request(char *buf, int fd, char *hostname, int port, char *proxy_request);
+void *thread(void *vargp);
 void doit(int fd);
 void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header);
 void clienterror(int fd, char *cause, char *errnum, 
@@ -35,8 +36,9 @@ int main(int argc, char **argv)
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
 
-    int listenfd,connfd,port,clientlen;
+    int listenfd,*connfd,port,clientlen;
     struct sockaddr_in clientaddr;
+    pthread_t tid;
 
     /* Ignore SIGPIPE */
     Signal(SIGPIPE, SIG_IGN);
@@ -58,14 +60,29 @@ int main(int argc, char **argv)
     /* Proxy is running */
     printf("Proxy is up and running...\n");
 
-    /* Accept connection from client, one at a time */
+    /* Spawn one thread for each client request */
     while(1) {
     	clientlen = sizeof(clientaddr);
-    	connfd = Accept(listenfd, (SA *)&clientaddr, (socklen_t *)&clientlen);
-    	doit(connfd);
-    	Close(connfd);
+        connfd = Malloc(sizeof(int));
+    	*connfd = Accept(listenfd, (SA *)&clientaddr, (socklen_t *)&clientlen);
+        Pthread_create(&tid, NULL, thread, connfd);
     }
     return 0;
+}
+
+/*
+ * thread
+ */
+void *thread(void *vargp) 
+{
+    /* Retrieve the file descriptor */
+    int fd = *((int *) vargp);
+    /* Detach the thread */
+    Pthread_detach(pthread_self());
+    Free(vargp);
+    doit(fd);
+    Close(fd);
+    return NULL;
 }
 
 /*
@@ -151,9 +168,12 @@ void doit(int fd)
     Rio_readinitb(&rio, fd);
     Rio_readlineb_new(&rio, buf, MAXLINE);
 
-    if (sscanf(buf, "%s %s %s", method, url, version) != 3) {
+    if ((sscanf(buf, "%s %s %s", method, url, version) != 3) &&
+        (strstr(url, "http://") == NULL) && 
+        (strstr(version, "HTTP/1.") == NULL))  {
         clienterror(fd, "", "Oops", "Malformed HTTP request",
                 "Bad!");
+        return;
     }
     if (strcasecmp(method, "GET")) { 
        clienterror(fd, method, "501", "Not Implemented",
@@ -218,7 +238,7 @@ void doit(int fd)
  */
  void launch_request(char *buf, int fd, char *hostname, int port, char *proxy_request) {
 
-    int proxyfd = open_clientfd(hostname, port);
+    int proxyfd = open_clientfd_r(hostname, port);
     rio_t rio_proxy;
     // char buf2[MAXLINE];
     size_t count;
