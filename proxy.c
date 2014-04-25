@@ -31,6 +31,7 @@ static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
 
 int main(int argc, char **argv)
 {
+
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
 
@@ -119,7 +120,7 @@ size_t Rio_readlineb_new(rio_t *rp, void *usrbuf, size_t maxlen)
 
     if ((rc = rio_readlineb(rp, usrbuf, maxlen)) < 0) {
         /* Ignore */
-        printf("Rio_readlineb error");
+        printf("Oops! Rio_readlineb error");
         return rc;
     }
 
@@ -137,30 +138,28 @@ void doit(int fd)
     char proxy_request[MAXLINE], request_header[MAXLINE];
     char port_string[MAXLINE];
     rio_t rio;
+
+    /* Reset */
+    memset(buf, 0, sizeof(buf));
+    memset(proxy_request, 0, sizeof(proxy_request));
+    memset(request_header, 0, sizeof(request_header));
+    memset(host_header, 0, sizeof(host_header));
+    memset(additional_header, 0, sizeof(additional_header));
+    memset(hostname, 0, sizeof(hostname));
   
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
     Rio_readlineb_new(&rio, buf, MAXLINE);
-    sscanf(buf, "%s %s %s", method, url, version);
+
+    if (sscanf(buf, "%s %s %s", method, url, version) != 3) {
+        clienterror(fd, "", "Oops", "Malformed HTTP request",
+                "Bad!");
+    }
     if (strcasecmp(method, "GET")) { 
        clienterror(fd, method, "501", "Not Implemented",
                 "Proxy does not implement this method");
         return;
     }
-
-
-    /* Reset buf */
-    memset(buf, 0, sizeof(buf));
-    /* Reset proxy request */
-    memset(proxy_request, 0, sizeof(proxy_request));
-    /* Reset request header */
-    memset(request_header, 0, sizeof(request_header));
-    /* Reset host header */
-    memset(host_header, 0, sizeof(host_header));
-    /* Reset additional header */
-    memset(additional_header, 0, sizeof(additional_header));
-    /* Reset hostname */
-    memset(hostname, 0, sizeof(hostname));
 
     /* Parse URL of Web browser to hostname and URI */
     parse_url(url, hostname, port_string, uri);
@@ -179,10 +178,7 @@ void doit(int fd)
      * and some additional header other then we
      * will define
      */
-    // printf("debug host_header: %s\n", host_header);
-    // printf("debug additional_header: %s\n", additional_header);
-
-    read_requesthdrs(buf, &rio, host_header, additional_header); 
+    read_requesthdrs(buf, &rio, host_header, additional_header);
 
     /* Set up HTTP request header */
     if (strstr(host_header,"Host")) {
@@ -256,7 +252,8 @@ void doit(int fd)
     printf("hostname = %s\n", hostname);
     printf("port number = %d\n", port);
     printf("----REQUEST HEADER----\n");
-    printf(proxy_request);
+    printf("header length = %d\n",(int)strlen(proxy_request));
+    printf("%s", proxy_request);
  }
 
 /*
@@ -305,7 +302,6 @@ void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_
             }
 		}
         Rio_readlineb_new(rp, buf, MAXLINE);
-        // printf("%s", buf);
     }
     return;
 }
@@ -398,7 +394,7 @@ void clienterror(int fd, char *cause, char *errnum,
     sprintf(body, "%s<body bgcolor=""ffffff"">\r\n", body);
     sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
     sprintf(body, "%s<p>%s: %s\r\n", body, longmsg, cause);
-    sprintf(body, "%s<hr><em>The Tiny Web server</em>\r\n", body);
+    sprintf(body, "%s<hr><em>The Super-Awesome Web Proxy</em>\r\n", body);
 
     /* Print the HTTP response */
     sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
