@@ -247,6 +247,10 @@ void doit(int fd)
     size_t content_length = 0;
     if (wo != NULL) {
         /* Deliver the web object to client */
+        printf("WOWOWOWOWOWOWOWOWOWOWOWOWOWOWOW\n");
+        printf("Web object found in cache\n");
+        printf("Its URL = %s\n", wo->url);
+        printf("WOWOWOWOWOWOWOWOWOWOWOWOWOWOWOW\n");
         wo_content = wo->content;
         content_length = wo->size;
         Rio_writen_new(fd, wo_content, content_length);
@@ -300,8 +304,6 @@ void doit(int fd)
     int end_of_header = 0;
     do {
         Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
-
-        printf("in launch_request--read HTTP header: buf = %s\n", buf);
 
         Rio_writen_new(fd, buf, strlen(buf));
         if (!strcmp(buf, "\r\n"))

@@ -24,7 +24,6 @@ int main() {
     find("http://www.stanford.edu");
     web_object *stanford = create_web_object("<HTTP>stanford<HTTP>", "http://www.stanford.edu", 20);
     add_to_cache(stanford);
-
     print_cache();
 }
 */
@@ -61,7 +60,7 @@ web_object *create_web_object(char *content, char *url, size_t content_length)
 {
 	web_object *wo = (web_object *) malloc(sizeof(web_object) * 1);
 	wo->content = (char *) malloc(sizeof(char) * content_length);
-	wo->url = (char *) malloc(sizeof(char) * strlen(url));
+	wo->url = (char *) malloc(sizeof(char) * strlen(url) + 1);
 	memcpy(wo->content, content, content_length);
 	strcpy(wo->url, url);
     wo->size = content_length;
