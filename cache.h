@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define MAX_CACHE_SIZE 1049000
+
 typedef struct web_object
 {
 	char *content; // pointer to actual web service content(value)
