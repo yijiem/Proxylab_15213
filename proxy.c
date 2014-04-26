@@ -4,16 +4,15 @@
  *  April 25th 2014
  */
 
-
-#include <stdio.h>
-#include <stdlib.h>
 #include "csapp.h"
+#include "cache.h"
 
 void parse_url(char *url, char *hostname, char *port_string, char *uri);
 void send_msg(int fd, char *msg_title, char* msg_detail);
 void change_http_version(char *version);
 void show_proxy_target(char *hostname, int port, char *proxy_request);
-void launch_request(char *buf, int fd, char *hostname, int port, char *proxy_request);
+int launch_request(char *buf, int fd, char *hostname, 
+                    int port, char *proxy_request, char *content, size_t &content_length)
 void *thread(void *vargp);
 void doit(int fd);
 void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header);
@@ -30,11 +29,16 @@ static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64;
 static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
 static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
 
+/* mutex */
+sem_t mutex;
+
 int main(int argc, char **argv)
 {
-
+    /* Proxy introduces itself */
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
+
+    sem_init(&mutex, 0, 1);
 
     int listenfd,*connfd,port,clientlen;
     struct sockaddr_in clientaddr;
@@ -80,7 +84,11 @@ void *thread(void *vargp)
     /* Detach the thread */
     Pthread_detach(pthread_self());
     Free(vargp);
+
+    P(&mutex);
     doit(fd);
+    V(&mutex);
+    
     Close(fd);
     return NULL;
 }
@@ -226,22 +234,47 @@ void doit(int fd)
     }
     
     /* Displays proxy's target */
-    show_proxy_target(hostname, port, proxy_request);
+    show_proxy_target(hostname, port, proxy_request); 
 
-    /* Proxy launch request on behalf of user */
-    launch_request(buf, fd, hostname, port, proxy_request);
+    /* Access cache */
+    web_object *wo = find(url);
 
+    char content[MAX_OBJECT_SIZE];
+    size_t content_length = 0;
+    if (wo != NULL) {
+        /* Deliver the web object to client */
+        content = wo->content;
+        content_length = wo->size;
+        Rio_writen_new(fd, content, content_length);
+    }
+    else {
+        /* Proxy launch request on behalf of user */
+        int can_cache = launch_request(buf, fd, hostname, port, proxy_request, content, content_length);
+        /* If the content_length exceeds the MAX OBJECT SIZE, discard content */
+        if (!can_cache) {
+            printf("Web object too large for caching...\n");
+        }
+        /* Cache the web object */
+        else {
+            printf("Caching web object...\n");
+            /* Access cache */
+            web_object *new_wo = create_web_object(content, url, content_length);
+            add_to_cache(new_wo);
+        }
+    }
 }
 
 /*
  * proxy launches request on behalf of user
+ * returns 1  when the web-object can be cached, 
+ * returns 0 when the size of the web-object exceeds the limit
  */
- void launch_request(char *buf, int fd, char *hostname, int port, char *proxy_request) {
-
+ int launch_request(char *buf, int fd, char *hostname, 
+                    int port, char *proxy_request, char *content, size_t &content_length) {
     int proxyfd = open_clientfd_r(hostname, port);
     rio_t rio_proxy;
-    // char buf2[MAXLINE];
     size_t count;
+    int can_cache = 1;
 
     /* error handling */
     if (proxyfd == -2) {
@@ -254,13 +287,33 @@ void doit(int fd)
             "Cannot connect to server at this port");
         return;
     }
-    /* deliver server's response to client */
+    /* deliver request to server */
     Rio_readinitb(&rio_proxy, proxyfd);
     Rio_writen_new(proxyfd, proxy_request, strlen(proxy_request));
-    while ((count = Rio_readn_new(proxyfd, buf, MAXLINE)) > 0) {
+
+    /* skip the HTTP response header */
+    int end_of_header = 0;
+    do {
+        Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
+        if (!strstr(buf, "\r\n"))
+            end_of_header = 1;
+
+    } while (!end_of_header);
+
+    /* read server response and write to client */
+    while ((count = Rio_readn_new(proxyfd, buf, MAXLINE)) > 0) {       
         Rio_writen_new(fd, buf, count);
+        /* save content for caching */
+        if (content_length + count > MAX_OBJECT_SIZE) {
+            can_cache = 0;  /* Exceeds maximum object size limit */
+        }
+        if (can_cache) {
+            memcpy(content + content_length, buf, count);
+            content_length += count;
+        }                    
     }
     Close(proxyfd);
+    return can_cache;
  }
 
 
