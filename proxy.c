@@ -30,7 +30,8 @@ static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,applica
 static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
 
 /* mutex */
-sem_t mutex;
+int readcnt;
+sem_t mutex, w;
 
 int main(int argc, char **argv)
 {
@@ -38,8 +39,10 @@ int main(int argc, char **argv)
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
 
-    /* Semophore */
+    readcnt = 0;
+    /* Semophore initialization*/
     sem_init(&mutex, 0, 1);
+    sem_init(&w, 0, 1);
 
     /* cache initialization */
     init_cache();
@@ -88,11 +91,7 @@ void *thread(void *vargp)
     /* Detach the thread */
     Pthread_detach(pthread_self());
     Free(vargp);
-
-    P(&mutex);
     doit(fd);
-    V(&mutex);
-
     Close(fd);
     return NULL;
 }
@@ -241,7 +240,10 @@ void doit(int fd)
     show_proxy_target(hostname, port, proxy_request); 
 
     /* Access cache */
-    web_object *wo = find(url);
+    P(&w);
+    /* Critical section: reading happens */
+    web_object *wo = find(url); 
+    V(&w);
 
     char *wo_content;
     size_t content_length = 0;
@@ -268,7 +270,12 @@ void doit(int fd)
             printf("Caching web object...\n");
             /* Access cache */
             web_object *new_wo = create_web_object(content, url, content_length);
+
+            P(&w);
+            /* Critical section */
             add_to_cache(new_wo);
+            V(&w);
+
         }
     }
 }
@@ -301,15 +308,15 @@ void doit(int fd)
     Rio_writen_new(proxyfd, proxy_request, strlen(proxy_request));
 
     /* skip the HTTP response header */
-    int end_of_header = 0;
-    do {
-        Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
+    // int end_of_header = 0;
+    // do {
+    //     Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
 
-        Rio_writen_new(fd, buf, strlen(buf));
-        if (!strcmp(buf, "\r\n"))
-            end_of_header = 1;
+    //     Rio_writen_new(fd, buf, strlen(buf));
+    //     if (!strcmp(buf, "\r\n"))
+    //         end_of_header = 1;
 
-    } while (!end_of_header);
+    // } while (!end_of_header);
 
     /* read server response and write to client */
     while ((count = Rio_readnb_new(&rio_proxy, buf, MAXLINE)) > 0) {       
