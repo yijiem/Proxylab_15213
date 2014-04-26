@@ -12,7 +12,7 @@ void send_msg(int fd, char *msg_title, char* msg_detail);
 void change_http_version(char *version);
 void show_proxy_target(char *hostname, int port, char *proxy_request);
 int launch_request(char *buf, int fd, char *hostname, 
-                    int port, char *proxy_request, char *content, size_t &content_length)
+                    int port, char *proxy_request, char *content, size_t *content_length);
 void *thread(void *vargp);
 void doit(int fd);
 void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header);
@@ -38,7 +38,11 @@ int main(int argc, char **argv)
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
 
+    /* Semophore */
     sem_init(&mutex, 0, 1);
+
+    /* cache initialization */
+    init_cache();
 
     int listenfd,*connfd,port,clientlen;
     struct sockaddr_in clientaddr;
@@ -88,7 +92,7 @@ void *thread(void *vargp)
     P(&mutex);
     doit(fd);
     V(&mutex);
-    
+
     Close(fd);
     return NULL;
 }
@@ -239,17 +243,18 @@ void doit(int fd)
     /* Access cache */
     web_object *wo = find(url);
 
-    char content[MAX_OBJECT_SIZE];
+    char *wo_content;
     size_t content_length = 0;
     if (wo != NULL) {
         /* Deliver the web object to client */
-        content = wo->content;
+        wo_content = wo->content;
         content_length = wo->size;
-        Rio_writen_new(fd, content, content_length);
+        Rio_writen_new(fd, wo_content, content_length);
     }
     else {
         /* Proxy launch request on behalf of user */
-        int can_cache = launch_request(buf, fd, hostname, port, proxy_request, content, content_length);
+        char content[MAX_OBJECT_SIZE];
+        int can_cache = launch_request(buf, fd, hostname, port, proxy_request, content, &content_length);
         /* If the content_length exceeds the MAX OBJECT SIZE, discard content */
         if (!can_cache) {
             printf("Web object too large for caching...\n");
@@ -270,7 +275,7 @@ void doit(int fd)
  * returns 0 when the size of the web-object exceeds the limit
  */
  int launch_request(char *buf, int fd, char *hostname, 
-                    int port, char *proxy_request, char *content, size_t &content_length) {
+                    int port, char *proxy_request, char *content, size_t *content_length) {
     int proxyfd = open_clientfd_r(hostname, port);
     rio_t rio_proxy;
     size_t count;
@@ -295,6 +300,7 @@ void doit(int fd)
     int end_of_header = 0;
     do {
         Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
+        Rio_writen_new(fd, buf, strlen(buf));
         if (!strstr(buf, "\r\n"))
             end_of_header = 1;
 
@@ -304,12 +310,12 @@ void doit(int fd)
     while ((count = Rio_readn_new(proxyfd, buf, MAXLINE)) > 0) {       
         Rio_writen_new(fd, buf, count);
         /* save content for caching */
-        if (content_length + count > MAX_OBJECT_SIZE) {
+        if ((*content_length) + count > MAX_OBJECT_SIZE) {
             can_cache = 0;  /* Exceeds maximum object size limit */
         }
         if (can_cache) {
-            memcpy(content + content_length, buf, count);
-            content_length += count;
+            memcpy(content + (*content_length), buf, count);
+            (*content_length) += count;
         }                    
     }
     Close(proxyfd);
