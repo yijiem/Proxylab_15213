@@ -44,7 +44,7 @@ int main(int argc, char **argv)
     /* cache initialization */
     init_cache();
 
-    int listenfd,*connfd,port,clientlen;
+    int listenfd, *connfd, port, clientlen;
     struct sockaddr_in clientaddr;
     pthread_t tid;
 
@@ -271,7 +271,7 @@ void doit(int fd)
 
 /*
  * proxy launches request on behalf of user
- * returns 1  when the web-object can be cached, 
+ * returns 1 when the web-object can be cached, 
  * returns 0 when the size of the web-object exceeds the limit
  */
  int launch_request(char *buf, int fd, char *hostname, 
@@ -300,14 +300,17 @@ void doit(int fd)
     int end_of_header = 0;
     do {
         Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
+
+        printf("in launch_request--read HTTP header: buf = %s\n", buf);
+
         Rio_writen_new(fd, buf, strlen(buf));
-        if (!strstr(buf, "\r\n"))
+        if (!strcmp(buf, "\r\n"))
             end_of_header = 1;
 
     } while (!end_of_header);
 
     /* read server response and write to client */
-    while ((count = Rio_readn_new(proxyfd, buf, MAXLINE)) > 0) {       
+    while ((count = Rio_readnb_new(&rio_proxy, buf, MAXLINE)) > 0) {       
         Rio_writen_new(fd, buf, count);
         /* save content for caching */
         if ((*content_length) + count > MAX_OBJECT_SIZE) {
