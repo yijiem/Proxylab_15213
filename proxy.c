@@ -1,30 +1,50 @@
 /*
- *  Version 3: Concurrent Web Proxy with Caching
+ *  213 Proxy Lab - Concurrent Web Proxy with Caching
  *  --------------------------------------------
- *  April 26th 2014
+ *  Team member: Wenting Shi
+ *               Yijie Ma
+ *  Date: April 27th 2014
+ *  --------------------------------------------
+ *  Description:
+ *  (1) This program is a web proxy that serves as an 
+ *      intermediary between client and server. 
+ *  (2) It is a multi-threaded proxy that can serve many
+ *      request simultaneously with different threads.
+ *      Readers/Writers lock has been used for protecting
+ *      critical resources (accessing of cache) and supporting
+ *      multiple readers.
+ *  (3) The proxy implements a caching functionality
+ *      with linked list and a LRU replacement policy. 
+ *      After receiving http request from the client, 
+ *      it checks whether the web object exists in the cache. 
+ *      If it finds the web object, it delivers directly from cache, 
+ *      otherwise it launches request to the server 
+ *      on behalf of the client and updates the cache. 
  */
 
 #include "csapp.h"
 #include "cache.h"
 
+/* Function declarations */
 void parse_url(char *url, char *hostname, char *port_string, char *uri);
-void send_msg(int fd, char *msg_title, char* msg_detail);
 void change_http_version(char *version);
 void show_proxy_target(char *hostname, int port, char *proxy_request);
 int launch_request(char *buf, int fd, char *hostname, 
-                    int port, char *proxy_request, char *content, size_t *content_length);
+                    int port, char *proxy_request, 
+                    char *content, size_t *content_length);
 void *thread(void *vargp);
 void doit(int fd);
-void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header);
+void read_requesthdrs(char *buf, rio_t *rp, char *host_header, 
+                        char *additional_header);
 void clienterror(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg);
 
 
-/* Recommended max cache and object sizes */
+/* Max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
-/* You won't lose style points for including these long lines in your code */
+/* Required headers */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
 static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
@@ -34,6 +54,11 @@ pthread_rwlock_t lock;
 
 int main(int argc, char **argv)
 {
+    int listenfd, *connfd, port, clientlen;
+    struct sockaddr_in clientaddr;
+    pthread_t tid;
+    sigset_t mask;
+
     /* Proxy introduces itself */
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
@@ -44,12 +69,7 @@ int main(int argc, char **argv)
     /* reader/writer lock initialization */
     pthread_rwlock_init(&lock, NULL);
 
-    int listenfd, *connfd, port, clientlen;
-    struct sockaddr_in clientaddr;
-    pthread_t tid;
-
     /* Block SIGPIPE */
-    sigset_t mask;
     Sigemptyset(&mask);
     Sigaddset(&mask, SIGPIPE);
     Sigprocmask(SIG_BLOCK, &mask, NULL);
@@ -61,10 +81,14 @@ int main(int argc, char **argv)
     }
     port = atoi(argv[1]);
 
-    listenfd = Open_listenfd(port);
-
-    /* Proxy is running */
-    printf("Proxy is up and running...\n");
+    listenfd = open_listenfd(port);
+    if (listenfd < 0) {
+        printf("Unable to use port: %d\n", port);
+    }
+    else {
+        /* Proxy is running */
+        printf("Proxy is up and running...\n");
+    }
 
     /* Spawn one thread for each client request */
     while(1) {
@@ -77,7 +101,7 @@ int main(int argc, char **argv)
 }
 
 /*
- * thread
+ * thread that handles one request
  */
 void *thread(void *vargp) 
 {
@@ -98,25 +122,9 @@ void Rio_writen_new(int fd, void *usrbuf, size_t n)
 {
     if (rio_writen(fd, usrbuf, n) != n) {
         /* Ignore */
-         printf("Oops! Rio_writen error...\n");
          return; 
     }
         
-}
-
-/*
- * our wrapper for rio_readn, does not exit proxy
- */
-ssize_t Rio_readn_new(int fd, void *ptr, size_t nbytes)
-{
-    size_t n;
-
-    if ((n = rio_readn(fd, ptr, nbytes)) < 0) {
-        /* Ignore */
-        printf("Oops! Rio_readn error...\n");
-        return n;
-    }
-
 }
 
 /*
@@ -128,7 +136,6 @@ ssize_t Rio_readnb_new(rio_t *rp, void *usrbuf, size_t n)
 
     if ((rc = rio_readnb(rp, usrbuf, n)) < 0) {
         /* Ignore */
-        printf("Oops! Rio_readnb error...\n");
         return rc;
     }
 
@@ -143,7 +150,6 @@ ssize_t Rio_readlineb_new(rio_t *rp, void *usrbuf, size_t maxlen)
 
     if ((rc = rio_readlineb(rp, usrbuf, maxlen)) < 0) {
         /* Ignore */
-        printf("Oops! Rio_readlineb error");
         return rc;
     }
 
@@ -160,7 +166,13 @@ void doit(int fd)
     char host_header[MAXLINE], additional_header[MAXLINE];
     char proxy_request[MAXLINE], request_header[MAXLINE];
     char port_string[MAXLINE];
+    char content[MAX_OBJECT_SIZE];
     rio_t rio;
+    char *wo_content;
+    size_t content_length = 0;
+    web_object *wo;
+    web_object *new_wo;
+    int can_cache;
 
     /* Reset */
     memset(buf, 0, sizeof(buf));
@@ -191,7 +203,7 @@ void doit(int fd)
     parse_url(url, hostname, port_string, uri);
     change_http_version(version);
 
-    /* Set up proxy's HTTP request string */
+    /* Set up first line of proxy's HTTP request string */
     strcat(proxy_request, method);
     strcat(proxy_request, " ");
     strcat(proxy_request, uri);
@@ -225,46 +237,37 @@ void doit(int fd)
     strcat(proxy_request, "\r\n");
 
     /* Open connection to target server */
-    if(*port_string != NULL){
+    if((*port_string) != '\0'){
         port = atoi(port_string);
     } else {
         port = atoi("80"); /* set default HTTP port */
     }
     
     /* Displays proxy's target */
-    show_proxy_target(hostname, port, proxy_request); 
+    //show_proxy_target(hostname, port, proxy_request); 
 
     /* Reader access cache */
     pthread_rwlock_rdlock(&lock);
-    web_object *wo = find(url);
+    wo = find(url);
     pthread_rwlock_unlock(&lock); 
 
-    char *wo_content;
-    size_t content_length = 0;
     if (wo != NULL) {
-        /* Deliver the web object to client */
-        printf("WOWOWOWOWOWOWOWOWOWOWOWOWOWOWOW\n");
-        printf("Web object found in cache\n");
-        printf("Its URL = %s\n", wo->url);
-        printf("WOWOWOWOWOWOWOWOWOWOWOWOWOWOWOW\n");
+        /* Deliver the web object to client from cache */
         wo_content = wo->content;
         content_length = wo->size;
         Rio_writen_new(fd, wo_content, content_length);
     }
     else {
         /* Proxy launch request on behalf of user */
-        char content[MAX_OBJECT_SIZE];
-        int can_cache = launch_request(buf, fd, hostname, port, proxy_request, content, &content_length);
-        /* If the content_length exceeds the MAX OBJECT SIZE, discard content */
+        can_cache = launch_request(buf, fd, hostname, port,
+                         proxy_request, content, &content_length);
         if (!can_cache) {
-            printf("Unable to cache...\n");
+            //printf("Unable to cache...\n");
         }
-        /* Cache the web object */
         else {
-            printf("Caching web object...\n");
-            /* Access cache */
-            web_object *new_wo = create_web_object(content, url, content_length);
-
+            /* Cache the web object */
+            //printf("Caching web object...\n");
+            new_wo = create_web_object(content, url, content_length);
             /* Writer access cache */
             pthread_rwlock_wrlock(&lock);
             add_to_cache(new_wo);
@@ -278,9 +281,11 @@ void doit(int fd)
  * proxy launches request on behalf of user
  * returns 1 when the web-object can be cached, 
  * returns 0 when the size of the web-object exceeds the limit
+ *           or proxy failed to connect to requested server
  */
  int launch_request(char *buf, int fd, char *hostname, 
-                    int port, char *proxy_request, char *content, size_t *content_length) {
+                    int port, char *proxy_request, 
+                    char *content, size_t *content_length) {
     int proxyfd = open_clientfd_r(hostname, port);
     rio_t rio_proxy;
     size_t count;
@@ -300,16 +305,6 @@ void doit(int fd)
     /* deliver request to server */
     Rio_readinitb(&rio_proxy, proxyfd);
     Rio_writen_new(proxyfd, proxy_request, strlen(proxy_request));
-
-    /* the HTTP response header does not count in size calculation */
-    // int end_of_header = 0;
-    // do {
-    //     Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
-    //     Rio_writen_new(fd, buf, strlen(buf));
-    //     if (!strcmp(buf, "\r\n"))
-    //         end_of_header = 1;
-
-    // } while (!end_of_header);
 
     /* read server response and write to client */
     while ((count = Rio_readnb_new(&rio_proxy, buf, MAXLINE)) > 0) {       
@@ -359,7 +354,7 @@ void doit(int fd)
  }
 
 /*
- * read_requesthdrs - read and parse HTTP request headers
+ * read_requesthdrs - read and parse browser's HTTP request headers
  */
 
 void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_header) 
@@ -391,32 +386,34 @@ void read_requesthdrs(char *buf, rio_t *rp, char *host_header, char *additional_
 }
 
 /*
- * parse_uri - parse complete URL from the browser
- *             into hostname and URI
+ * parse_url - parse complete URL from the browser
+ *             into hostname, port, URI
  */
 
 void parse_url(char *url, char *hostname, char *port_string, char *uri) 
 {
-   /* for extracting hostname in URL */
    int begin = 0;
    int end = 0;
-   char *pos; 
+   int i;
+   char *pos;
+   char *colonPosition;
+   char *hostnamePosition; 
     if (pos = strstr(url, "//")) {
        pos += 2;
        begin = (int) (pos - url);
     }
-    char *hostnamePosition = pos;
+    hostnamePosition = pos;
 
-    if (pos = strstr(pos, ":")) { // has port number
-        //printf("inside has port number\n");
-        char *colonPosition = pos;
+    if (pos = strstr(pos, ":")) {
+        /* has port number */ 
+        colonPosition = pos;
         /* extract port number */
-        if(pos = strstr(pos, "/")) { // has port number and has uri
+        if(pos = strstr(pos, "/")) { 
             /* extract uri */
             strcpy(uri, pos);
             end = (int) (colonPosition - url);
             /* extract hostname */
-            for (int i = begin; i < end; i++) {
+            for (i = begin; i < end; i++) {
                 hostname[i - begin] = url[i];
             }
             /* add null terminating string */
@@ -424,34 +421,34 @@ void parse_url(char *url, char *hostname, char *port_string, char *uri)
 
             /* extrace port string */
             int portLength = (int) (pos - colonPosition - 1);
-            for (int i = 0; i < portLength; i++) {
+            for (i = 0; i < portLength; i++) {
                 port_string[i] = colonPosition[i + 1];
             }
             /* add null terminating string */
             port_string[strlen(port_string)] = '\0';
         }
-        else { // has port number, but no uri
+        else { 
+            /* no uri, only port number */
             strcpy(uri, "/");
-            // no uri, so all char after ":" belongs to port number
-            // printf("has port number, but no uri\n");
             end = (int) (colonPosition - url);
             /* extract hostname */
-            for (int i = begin; i < end; i++) {
+            for (i = begin; i < end; i++) {
                 hostname[i - begin] = url[i];
             }
             hostname[strlen(hostname)] = '\0';
             strcpy(port_string, colonPosition + 1);
         }
     }
-    else { // do not have port number
-        *port_string = NULL;
-        pos = hostnamePosition; // recur pos
+    else { 
+        /* no port number detected */
+        *port_string = '\0';
+        pos = hostnamePosition; 
         if (pos = strstr(pos, "/")) {
             /* extract uri */
             strcpy(uri, pos);
             end = (int) (pos - url);
             /* extract hostname */
-            for (int i = begin; i < end; i++) {
+            for (i = begin; i < end; i++) {
                 hostname[i - begin] = url[i];
             }
             /* add null terminating string */
