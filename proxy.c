@@ -1,7 +1,7 @@
 /*
- *  Version 2: Concurrent Web Proxy
- *  -------------------------------
- *  April 25th 2014
+ *  Version 3: Concurrent Web Proxy with Caching
+ *  --------------------------------------------
+ *  April 26th 2014
  */
 
 #include "csapp.h"
@@ -29,9 +29,8 @@ static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64;
 static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
 static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
 
-/* mutex */
-int readcnt;
-sem_t mutex, w;
+/* Reader/Writer Lock for Cache Access */
+pthread_rwlock_t lock;
 
 int main(int argc, char **argv)
 {
@@ -39,20 +38,16 @@ int main(int argc, char **argv)
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
     printf("\n");
 
-    readcnt = 0;
-    /* Semophore initialization*/
-    sem_init(&mutex, 0, 1);
-    sem_init(&w, 0, 1);
-
     /* cache initialization */
     init_cache();
+
+    /* reader/writer lock initialization */
+    pthread_rwlock_init(&lock, NULL);
 
     int listenfd, *connfd, port, clientlen;
     struct sockaddr_in clientaddr;
     pthread_t tid;
 
-    /* Ignore SIGPIPE */
-    Signal(SIGPIPE, SIG_IGN);
     /* Block SIGPIPE */
     sigset_t mask;
     Sigemptyset(&mask);
@@ -112,7 +107,7 @@ void Rio_writen_new(int fd, void *usrbuf, size_t n)
 /*
  * our wrapper for rio_readn, does not exit proxy
  */
-size_t Rio_readn_new(int fd, void *ptr, size_t nbytes)
+ssize_t Rio_readn_new(int fd, void *ptr, size_t nbytes)
 {
     size_t n;
 
@@ -127,7 +122,7 @@ size_t Rio_readn_new(int fd, void *ptr, size_t nbytes)
 /*
  * our wrapper for rio_readnb, does not exit proxy
  */
-size_t Rio_readnb_new(rio_t *rp, void *usrbuf, size_t n)
+ssize_t Rio_readnb_new(rio_t *rp, void *usrbuf, size_t n)
 {
     size_t rc;
 
@@ -142,7 +137,7 @@ size_t Rio_readnb_new(rio_t *rp, void *usrbuf, size_t n)
 /*
  * our wrapper for rio_readlineb, does not exit proxy
  */
-size_t Rio_readlineb_new(rio_t *rp, void *usrbuf, size_t maxlen)
+ssize_t Rio_readlineb_new(rio_t *rp, void *usrbuf, size_t maxlen)
 {
     size_t rc;
 
@@ -179,8 +174,8 @@ void doit(int fd)
     Rio_readinitb(&rio, fd);
     Rio_readlineb_new(&rio, buf, MAXLINE);
 
-    if ((sscanf(buf, "%s %s %s", method, url, version) != 3) &&
-        (strstr(url, "http://") == NULL) && 
+    if ((sscanf(buf, "%s %s %s", method, url, version) != 3) ||
+        (strstr(url, "http://") == NULL) || 
         (strstr(version, "HTTP/1.") == NULL))  {
         clienterror(fd, "", "Oops", "Malformed HTTP request",
                 "Bad!");
@@ -239,11 +234,10 @@ void doit(int fd)
     /* Displays proxy's target */
     show_proxy_target(hostname, port, proxy_request); 
 
-    /* Access cache */
-    P(&w);
-    /* Critical section: reading happens */
-    web_object *wo = find(url); 
-    V(&w);
+    /* Reader access cache */
+    pthread_rwlock_rdlock(&lock);
+    web_object *wo = find(url);
+    pthread_rwlock_unlock(&lock); 
 
     char *wo_content;
     size_t content_length = 0;
@@ -263,7 +257,7 @@ void doit(int fd)
         int can_cache = launch_request(buf, fd, hostname, port, proxy_request, content, &content_length);
         /* If the content_length exceeds the MAX OBJECT SIZE, discard content */
         if (!can_cache) {
-            printf("Web object too large for caching...\n");
+            printf("Unable to cache...\n");
         }
         /* Cache the web object */
         else {
@@ -271,11 +265,11 @@ void doit(int fd)
             /* Access cache */
             web_object *new_wo = create_web_object(content, url, content_length);
 
-            P(&w);
-            /* Critical section */
+            /* Writer access cache */
+            pthread_rwlock_wrlock(&lock);
             add_to_cache(new_wo);
-            V(&w);
-
+            pthread_rwlock_unlock(&lock);
+            
         }
     }
 }
@@ -296,22 +290,21 @@ void doit(int fd)
     if (proxyfd == -2) {
         clienterror(fd, hostname, "Oops!", "DNS error",
                 "Server not found");
-        return;
+        return 0;
     }
     if (proxyfd == -1) {
         clienterror(fd, hostname, "Oops!", "Unix error",
             "Cannot connect to server at this port");
-        return;
+        return 0;
     }
     /* deliver request to server */
     Rio_readinitb(&rio_proxy, proxyfd);
     Rio_writen_new(proxyfd, proxy_request, strlen(proxy_request));
 
-    /* skip the HTTP response header */
+    /* the HTTP response header does not count in size calculation */
     // int end_of_header = 0;
     // do {
     //     Rio_readlineb_new(&rio_proxy, buf, MAXLINE);
-
     //     Rio_writen_new(fd, buf, strlen(buf));
     //     if (!strcmp(buf, "\r\n"))
     //         end_of_header = 1;
